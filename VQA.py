@@ -2,7 +2,7 @@
 # General imports
 import numpy as np
 import qiskit
-#from qiskit.quantum_info import SparsePauliOp
+from qiskit.quantum_info import SparsePauliOp
 
 # SciPy minimizer routine
 from scipy.optimize import minimize
@@ -26,11 +26,6 @@ sampler = Sampler()
 from qiskit_ibm_runtime import QiskitRuntimeService
 from qiskit_aer.noise import (NoiseModel,QuantumError,ReadoutError,depolarizing_error,pauli_error,thermal_relaxation_error)
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
-# YOUR_API_TOKEN = "a44932650c6324c729fbd156e2808cff2dc96cc78fdaf3058a5e3583edfadad4acf73471140788f0efa7ed71a98f1e13069af52fe115e4e0e2bb868ab0be5d70"
-# QiskitRuntimeService.save_account(channel="ibm_quantum", token= YOUR_API_TOKEN, overwrite = True)
-# service = QiskitRuntimeService()
-# backend = service.backend("ibm_brisbane")
-# noise_model = NoiseModel.from_backend(backend)
 
 # %% [markdown]
 # # Code for Shadow Tomography of Quantum States
@@ -63,51 +58,49 @@ def shadow_tomography_clifford(N_qubits,quantum_circuit, reps = 1):
 
      # Random Clifford gates to apply to the quantum circuit.
      cliffords = [qiskit.quantum_info.random_clifford(N_qubits,) for _ in range(n_Shadows)]
-
-     #rho_actual = qiskit.quantum_info.DensityMatrix(quantum_circuit).data
-
-     results = []
-for cliff in cliffords:
-     # Compose the quantum circuit with the random Clifford gate.
-     # This amounts to randomly rotating the state as called in the original paper.
-     qc_c = quantum_circuit.copy()
-     qc_c.append(cliff.to_circuit(), quantum_circuit.qubits[1:])
-
-     # If not transpiled gives error.
-     qc_c = transpile(qc_c, basis_gates = ["rx", "ry", "rz", "cx", "x", "y", "z"])
-     # Measuring the state in computational basis.
-     #counts = qiskit.quantum_info.Statevector(qc_c).sample_counts(reps)
-     # Simulate the circuit and get the counts.
-     qr_meas = qiskit.QuantumRegister(N_qubits+1, "q")
-     cr_meas = qiskit.ClassicalRegister(N_qubits, "c")
-     qc_meas = qiskit.QuantumCircuit(qr_meas, cr_meas)  
-
-     for instr, qargs, cargs in qc_c:
-          qc_meas.append(instr, qargs, cargs)
-
-     for i in range(1, N_qubits+1):
-          qc_meas.measure(qr_meas[i], cr_meas[i-1])            
-
-     pm = generate_preset_pass_manager(optimization_level = 3)
-     isa_circuit = pm.run(qc_meas)
-     #isa_circuit = transpile(isa_circuit)
-     result = sampler.run([isa_circuit], shots = 1).result()
-     data_pub = result[0].data
-     counts = data_pub.c.get_counts()
-
-     results.append(counts)
      
-# This section calculates the shadow density matrices using the inverse channel.        
-shadows = []
-for cliff, res in zip(cliffords, results):
-     mat    = cliff.adjoint().to_matrix()
-     for bit,count in res.items():
-          Ub = mat[:,int(bit,2)] # this is Udag|b>
-          shadows.append(Minv(N_qubits,np.outer(Ub,Ub.conj()))*count)
+     #rho_actual = qiskit.quantum_info.DensityMatrix(quantum_circuit).data
+     
+     results = []
+     for cliff in cliffords:
+          # Compose the quantum circuit with the random Clifford gate.
+          # This amounts to randomly rotating the state as called in the original paper.
+          qc_c = quantum_circuit.copy()
+          qc_c.append(cliff.to_circuit(), quantum_circuit.qubits[1:])
 
-#rho_shadow = np.sum(shadows,axis=0)/(nShadows*reps)
+          # If not transpiled gives error.
+          qc_c = transpile(qc_c, basis_gates = ["rx", "ry", "rz", "cx", "x", "y", "z"])
+          # Measuring the state in computational basis.
+          #counts = qiskit.quantum_info.Statevector(qc_c).sample_counts(reps)
+          # Simulate the circuit and get the counts.
+          qr_meas = qiskit.QuantumRegister(N_qubits+1, "q")
+          cr_meas = qiskit.ClassicalRegister(N_qubits, "c")
+          qc_meas = qiskit.QuantumCircuit(qr_meas, cr_meas)  
 
-return shadows
+          for instr, qargs, cargs in qc_c:
+               qc_meas.append(instr, qargs, cargs)
+
+          for i in range(1, N_qubits+1):
+               qc_meas.measure(qr_meas[i], cr_meas[i-1])            
+
+          pm = generate_preset_pass_manager(optimization_level = 3)
+          isa_circuit = pm.run(qc_meas)
+          #isa_circuit = transpile(isa_circuit)
+          result = sampler.run([isa_circuit], shots = 1).result()
+          data_pub = result[0].data
+          counts = data_pub.c.get_counts()
+
+          results.append(counts)
+        
+     # This section calculates the shadow density matrices using the inverse channel.        
+     shadows = []
+     for cliff, res in zip(cliffords, results):
+          mat    = cliff.adjoint().to_matrix()
+          for bit,count in res.items():
+               Ub = mat[:,int(bit,2)] # this is Udag|b>
+               shadows.append(Minv(N_qubits,np.outer(Ub,Ub.conj()))*count)
+
+     return shadows
 
 def linear_function_prediction(N, K, operator_linear, list_of_shadows):
 
@@ -119,23 +112,23 @@ def linear_function_prediction(N, K, operator_linear, list_of_shadows):
 
      list_of_means = []
      operator_linear_sparse = csr_matrix(operator_linear)
-     
-     # Calculating K means.
+    
+    # Calculating K means.
      for k in range(1,K+1):
           shadows_mean = 0.0
           for j in range(N*(k-1)+1,N*k+1):
                rho_j_sparse = csr_matrix(list_of_shadows[j-1])
                shadows_mean += trace(operator_linear_sparse @ rho_j_sparse).real
-               
+            
           list_of_means.append(shadows_mean/N)
-          
+        
      # Calculating the median of K means.
      return np.median(list_of_means)
 
 def quadratic_function_prediction(N, K, operator_m, operator_n, list_of_shadows):
-
+    
      list_of_means = []
-
+     
      SWAP = csr_matrix(np.matrix([[1,0,0,0],
                                    [0,0,1,0],
                                    [0,1,0,0],
@@ -143,8 +136,8 @@ def quadratic_function_prediction(N, K, operator_m, operator_n, list_of_shadows)
 
      # While calculating the operator O the order of operator_m and operator_n is irrelevant.
      O_quadratic = SWAP @ kron(csr_matrix(operator_m), csr_matrix(operator_n))
-
-     # Calculating K means
+    
+    # Calculating K means
      for k in range(1, K + 1):
           shadows_mean = 0.0        
           for j in range(N * (k - 1) + 1, N * k + 1):
@@ -152,11 +145,10 @@ def quadratic_function_prediction(N, K, operator_m, operator_n, list_of_shadows)
                     if j != l:
                          rho_j_sparse = csr_matrix(list_of_shadows[j - 1])
                          rho_l_sparse = csr_matrix(list_of_shadows[l - 1])
-                         #shadows_mean += trace(O_quadratic @ kron(rho_j_sparse, rho_l_sparse)).real
-                         shadows_mean += (O_quadratic @ kron(rho_j_sparse, rho_l_sparse)).diagonal().sum().real
-                         
+                    shadows_mean += (O_quadratic @ kron(rho_j_sparse, rho_l_sparse)).diagonal().sum().real
+                    
           list_of_means.append(shadows_mean / (N * (N - 1)))
-     
+        
      # Calculating their median
      return np.median(list_of_means)  
 
@@ -177,7 +169,7 @@ def anstaz_circuit(angles_lst, number_of_layers):
      number_of_angles_per_layer = 4
 
      if len(angles_lst*number_of_angles_per_layer) % number_of_layers != 0:
-          raise ValueError("The number of angles should be divisible by the number of layers.")
+         raise ValueError("The number of angles should be divisible by the number of layers.")
      else:
           n_qubits = 1
           anstaz_circuit = QuantumCircuit(n_qubits+1)
@@ -189,34 +181,13 @@ def anstaz_circuit(angles_lst, number_of_layers):
                anstaz_circuit.reset(0)
      return anstaz_circuit     
 
-# %%
-# Drawing the circuit for visualization.
-trans_vqa = transpile(anstaz_circuit([(0.1,0.2,0.3,0.4), (0.1,0.2,0.3,0.4)],2), basis_gates = ["rx", "ry", "rz", "cx"])
-#trans_vqa.draw("mpl", scale=1.5)
-
-# %%
-# Shadow tomography.
-
-# Determining the number of shadows required.
-# number_of_functions_to_predict = 6
-# epsilon = 0.1
-# delta = 0.8
-
-# N = 2*np.log(2*number_of_functions_to_predict/delta)
-# K = 34/epsilon**2
-# n_Shadows = int(N*K)
-
-N = 100
-K = 100
+N = 20
+K = 20
 n_Shadows = N*K
+
+np.save("N.npy", N)
+np.save("K.npy", K)
 np.save("n_Shadows.npy", n_Shadows)
-
-# %%
-#st_instance = shadow_tomography_clifford(1, vqa_circuit(0.1,0.2,0.3,0.4), reps = 1)
-
-# %%
-#quadratic_function_prediction(N, K, np.array([[1,0],[0,-1]]), np.array([[1,0],[0,-1]]), st_instance)
-
 # %%
 I = np.array([[1,0],[0,1]])
 sigma_x = np.array([[0,1],[1,0]])
@@ -250,9 +221,10 @@ theta_z = np.random.uniform(-np.pi, np.pi)
 phi = np.random.uniform(-np.pi, np.pi)
 
 #print("Initial set of parameters =", theta_x, theta_y, theta_z, phi)
-np.save("initial_params.npy", [theta_x, theta_y, theta_z, phi])
+np.save("initial_parameters.npy", [theta_x, theta_y, theta_z, phi])
 
-initial_learning_rate = 2.0
+initial_learning_rate = 1.0
+np.save("initial_learning_rate.npy", initial_learning_rate)
 number_of_iterations = 0
 max_iterations = 100
 
@@ -260,7 +232,8 @@ best_cost = float("inf")
 best_theta_x, best_theta_y, best_theta_z, best_phi = theta_x, theta_y, theta_z, phi
 best_iteration = 0
 
-b = 0.5
+
+b = 1
 gamma_1 = 2
 gamma_2 = 3
 
@@ -271,15 +244,18 @@ while number_of_iterations < max_iterations:
      st_instance = shadow_tomography_clifford(1,anstaz_circuit([(theta_x,theta_y,theta_z,phi)],num_layers))
      cost_value = np.real(cost_function(b, gamma_1, gamma_2, st_instance))
 
-     # Update best parameters if a new minimum cost is found
+    # Update best parameters if a new minimum cost is found
      if cost_value < best_cost:
           best_cost = cost_value
           best_theta_x, best_theta_y, best_theta_z, best_phi = theta_x, theta_y, theta_z, phi
           best_iteration = number_of_iterations  # Update iteration number for best cost    
 
      if cost_value <= tolerance_for_convergence:
-          np.save("converged_cost_function.npy", [theta_x, theta_y, theta_z, phi])
-          np.save("converged_best_cost.npy", best_cost)
+          #print("\n[CONVERGED] Cost function is less than the tolerance value.\n")
+          #print("Cost function =", cost_value)
+          np.save("cost_value.npy", cost_value)
+          #print("Optimized parameters =", theta_x, theta_y, theta_z, phi)
+          np.save("optimized_parameters.npy", [theta_x, theta_y, theta_z, phi])
           break
 
      # Decaying learning rate
@@ -310,17 +286,18 @@ while number_of_iterations < max_iterations:
      phi -= learning_rate * gradient_phi
 
      number_of_iterations += 1
-     #print("Cost function =", cost_value)
-     #print("Number of iterations =", number_of_iterations)
-     #print("Learning rate =", learning_rate)
+     print("Cost function =", cost_value)
+     print("Number of iterations =", number_of_iterations)
+     print("Learning rate =", learning_rate)
 
 if number_of_iterations == max_iterations:
-     np.save("max_iter_cost_function.npy", [theta_x, theta_y, theta_z, phi])
-     np.save("max_iter_best_cost.npy", best_cost)
-     np.save("max_iter_best_params.npy", [best_theta_x, best_theta_y, best_theta_z, best_phi])
+     print("\n[STOPPED] Maximum number of iterations reached.\n")
+     print("Cost function =", cost_function(theta_x, theta_y, theta_z, phi))
+     print("Optimized parameters =", theta_x, theta_y, theta_z, phi)
+     print("\n[RESULT] Minimum cost encountered =", best_cost)
+     print("Parameters corresponding to minimum cost =", best_theta_x, best_theta_y, best_theta_z, best_phi)
+     print("Iteration number for minimum cost =", best_iteration)
 
-
-"""
 # %% [markdown]
 # ## Adam optimizer
 
@@ -366,13 +343,13 @@ while number_of_iterations < max_iterations:
      # Calculate gradients using parameter shift
      gradients = [
           0.5 * (np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x + np.pi/2, theta_y, theta_z, phi)], num_layers)))) - 
-               np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x - np.pi/2, theta_y, theta_z, phi)], num_layers))))),
+                  np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x - np.pi/2, theta_y, theta_z, phi)], num_layers))))),
           0.5 * (np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y + np.pi/2, theta_z, phi)], num_layers)))) - 
-               np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y - np.pi/2, theta_z, phi)], num_layers))))),
+                  np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y - np.pi/2, theta_z, phi)], num_layers))))),
           0.5 * (np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y, theta_z + np.pi/2, phi)], num_layers)))) - 
-               np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y, theta_z - np.pi/2, phi)], num_layers))))),
+                  np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y, theta_z - np.pi/2, phi)], num_layers))))),
           0.5 * (np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y, theta_z, phi + np.pi/2)], num_layers)))) - 
-               np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y, theta_z, phi - np.pi/2)], num_layers)))))
+                  np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y, theta_z, phi - np.pi/2)], num_layers)))))
      ]
      
      # Adam update with gradient clipping
@@ -398,4 +375,6 @@ while number_of_iterations < max_iterations:
 # After the loop, print the best found values and corresponding iteration number
 print("\n[RESULT] Minimum cost encountered =", best_cost)
 print("Parameters corresponding to minimum cost =", best_theta_x, best_theta_y, best_theta_z, best_phi)
-print("Iteration number for minimum cost =", best_iteration)"""
+print("Iteration number for minimum cost =", best_iteration)
+
+
