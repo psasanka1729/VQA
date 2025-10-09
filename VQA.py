@@ -1,380 +1,354 @@
-# %%
-# General imports
 import numpy as np
-import qiskit
-from qiskit.quantum_info import SparsePauliOp
-
-# SciPy minimizer routine
-from scipy.optimize import minimize
-
-# Plotting functions
-import matplotlib.pyplot as plt
-
-# %%
-# [Reference]: https://docs.quantum.ibm.com/guides/build-noise-models
-# https://docs.quantum.ibm.com/guides/simulate-with-qiskit-aer
-
-from qiskit_aer import AerSimulator
-
-from qiskit_aer.primitives import SamplerV2 as Sampler
-#from qiskit_ibm_runtime import SamplerV2 as Sampler
-# from qiskit.primitives import StatevectorSampler
-# sampler = StatevectorSampler()
-sampler = Sampler()
-
-
-from qiskit_ibm_runtime import QiskitRuntimeService
-from qiskit_aer.noise import (NoiseModel,QuantumError,ReadoutError,depolarizing_error,pauli_error,thermal_relaxation_error)
+from qiskit import*
+from qiskit.quantum_info import SparsePauliOp, Statevector
+from qiskit_nature.second_q.operators import FermionicOp
+from qiskit_nature.second_q.mappers import JordanWignerMapper, BravyiKitaevMapper
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+import os, qiskit_aer, pickle, itertools
+from qiskit_algorithms import TimeEvolutionProblem
+import trotter_for_open_quantum_systems as trotter
 
-# %% [markdown]
-# # Code for Shadow Tomography of Quantum States
+class VQA:
+     def __init__(self, hamiltonian_of_molecule, cutoff, remove_identity):
 
-# %%
-from scipy.sparse import csr_matrix
-from scipy.sparse import csr_matrix, kron
-from numpy import trace
+          # Input: hamiltonian_of_molecule is a FermionicOp object
+          self.hamiltonian_of_molecule = hamiltonian_of_molecule
+          self.mapper = JordanWignerMapper()
 
-# Here we will write the necessary codes for shadow tomography.
+          # Jordan-Wigner transformation of the fermionic Hamiltonian.
+          self.qubit_hamiltonian = self.mapper.map(hamiltonian_of_molecule)
+          self.L = len(self.qubit_hamiltonian.paulis.to_labels()[0]) # Number of qubits.
 
-# Inverse shadow channel for Clifford gates.
-def Minv(N_qubits,X):
-     return ((2**N_qubits+1.))*X - np.eye(2**N_qubits)
+          # Set the cutoff for the number of terms in the Hamiltonian.
+          self.cutoff = cutoff
+          self.qubit_hamiltonian_truncated = self.qubit_hamiltonian.chop(cutoff).simplify()
+          print(f"Number of terms in original qubit Hamiltonian: {len(self.qubit_hamiltonian.paulis.to_labels())}")
+          print(f"Number of terms in truncated qubit Hamiltonian: {len(self.qubit_hamiltonian_truncated.paulis.to_labels())}")
 
-# Function performs shadow tomography for a given quantum circuit.
-def shadow_tomography_clifford(N_qubits,quantum_circuit, reps = 1):
 
-     """
-     This function performs shadow tomography for a given quantum circuit.
-     Parameters:
-     N_qubits: int
-          Number of qubits in the quantum circuit.
-     quantum_circuit: qiskit.QuantumCircuit
+          self.remove_identity = remove_identity
+          if self.remove_identity == True:
+               self.qubit_hamiltonian_truncated = self.qubit_hamiltonian_truncated - SparsePauliOp(["I"* (self.L)], [self.qubit_hamiltonian_truncated.coeffs[0]])
+               print("The identity term has been removed from the qubit Hamiltonian.")
 
-     Output:
-     shadows: list
-          List of shadow density matrices of the system.
-     """
+     def lowest_half_filled_states(self):
+          """
+          This function returns the lowest energy half-filled states of the fermionic_hamiltonian_matrix. 
+          """
+          # Generate all possible half-filled states.
+          zeros = [0] * (self.L//2)
+          ones = [1] * (self.L//2)
+          binary_list = zeros + ones
+          unique_permutations = set(itertools.permutations(binary_list))
+          half_filled_states_lst = ["".join(map(str, perm)) for perm in unique_permutations]
 
-     # Random Clifford gates to apply to the quantum circuit.
-     cliffords = [qiskit.quantum_info.random_clifford(N_qubits,) for _ in range(n_Shadows)]
+          energy_half_filled_states = []
+          # Calculate the energy of each half-filled state.
+          for half_filled_state in half_filled_states_lst:
+               #half_filled_state = half_filled_state[::-1]
+               energy_half_filled_states.append((half_filled_state, np.real(Statevector.from_label(half_filled_state).expectation_value(self.qubit_hamiltonian_truncated))))
+          sorted_energy_half_filled_states = sorted(energy_half_filled_states, key = lambda x: x[1])
+          return sorted_energy_half_filled_states  
      
-     #rho_actual = qiskit.quantum_info.DensityMatrix(quantum_circuit).data
-     
-     results = []
-     for cliff in cliffords:
-          # Compose the quantum circuit with the random Clifford gate.
-          # This amounts to randomly rotating the state as called in the original paper.
-          qc_c = quantum_circuit.copy()
-          qc_c.append(cliff.to_circuit(), quantum_circuit.qubits[1:])
+     def LUMO_index(self):
 
-          # If not transpiled gives error.
-          qc_c = transpile(qc_c, basis_gates = ["rx", "ry", "rz", "cx", "x", "y", "z"])
-          # Measuring the state in computational basis.
-          #counts = qiskit.quantum_info.Statevector(qc_c).sample_counts(reps)
-          # Simulate the circuit and get the counts.
-          qr_meas = qiskit.QuantumRegister(N_qubits+1, "q")
-          cr_meas = qiskit.ClassicalRegister(N_qubits, "c")
-          qc_meas = qiskit.QuantumCircuit(qr_meas, cr_meas)  
+          all_states = self.lowest_half_filled_states()
 
-          for instr, qargs, cargs in qc_c:
-               qc_meas.append(instr, qargs, cargs)
+          # Ground state.
+          gs = all_states[0]
+          # First excited state.
+          es = all_states[1]
 
-          for i in range(1, N_qubits+1):
-               qc_meas.measure(qr_meas[i], cr_meas[i-1])            
+          # Check if the ground state is degenerate.
+          es_idx = 2
+          while True:
+               if gs != es:
+                    break
+               else:
+                    es = all_states[es_idx]
+                    es_idx += 1
 
-          pm = generate_preset_pass_manager(optimization_level = 3)
-          isa_circuit = pm.run(qc_meas)
-          #isa_circuit = transpile(isa_circuit)
-          result = sampler.run([isa_circuit], shots = 1).result()
-          data_pub = result[0].data
-          counts = data_pub.c.get_counts()
-
-          results.append(counts)
-        
-     # This section calculates the shadow density matrices using the inverse channel.        
-     shadows = []
-     for cliff, res in zip(cliffords, results):
-          mat    = cliff.adjoint().to_matrix()
-          for bit,count in res.items():
-               Ub = mat[:,int(bit,2)] # this is Udag|b>
-               shadows.append(Minv(N_qubits,np.outer(Ub,Ub.conj()))*count)
-
-     return shadows
-
-def linear_function_prediction(N, K, operator_linear, list_of_shadows):
-
-     """ 
-     This function calculates the linear function prediction of the operator_linear given the list of shadows.
-     The total number of shadows is N*K. The function returns the median of the K means as described in
-     https://arxiv.org/abs/2002.08953
-     """
-
-     list_of_means = []
-     operator_linear_sparse = csr_matrix(operator_linear)
-    
-    # Calculating K means.
-     for k in range(1,K+1):
-          shadows_mean = 0.0
-          for j in range(N*(k-1)+1,N*k+1):
-               rho_j_sparse = csr_matrix(list_of_shadows[j-1])
-               shadows_mean += trace(operator_linear_sparse @ rho_j_sparse).real
-            
-          list_of_means.append(shadows_mean/N)
-        
-     # Calculating the median of K means.
-     return np.median(list_of_means)
-
-def quadratic_function_prediction(N, K, operator_m, operator_n, list_of_shadows):
-    
-     list_of_means = []
-     
-     SWAP = csr_matrix(np.matrix([[1,0,0,0],
-                                   [0,0,1,0],
-                                   [0,1,0,0],
-                                   [0,0,0,1]]))
-
-     # While calculating the operator O the order of operator_m and operator_n is irrelevant.
-     O_quadratic = SWAP @ kron(csr_matrix(operator_m), csr_matrix(operator_n))
-    
-    # Calculating K means
-     for k in range(1, K + 1):
-          shadows_mean = 0.0        
-          for j in range(N * (k - 1) + 1, N * k + 1):
-               for l in range(N * (k - 1) + 1, N * k + 1):
-                    if j != l:
-                         rho_j_sparse = csr_matrix(list_of_shadows[j - 1])
-                         rho_l_sparse = csr_matrix(list_of_shadows[l - 1])
-                    shadows_mean += (O_quadratic @ kron(rho_j_sparse, rho_l_sparse)).diagonal().sum().real
+          # LUMO index.
+          # Since Qiskit counts qubits from right to left, we reverse the bitstrings.
+          # print(f"Ground state {gs}")
+          # print(f"Excited state {es}")          
+          gs = gs[0][::-1]
+          es = es[0][::-1]
+          # LUMO is the first index where the ground state and first excited state differ.
+          for idx in range(self.L):
+               if gs[idx] != es[idx]:
+                    LUMO_idx =  idx
+                    # print(f"The LUMO is at qubit index {LUMO_idx}")                    
+                    return LUMO_idx                                    
                     
-          list_of_means.append(shadows_mean / (N * (N - 1)))
-        
-     # Calculating their median
-     return np.median(list_of_means)  
+     def initial_state(self):
+          initial_state_of_the_system = self.lowest_half_filled_states()[0][0]          
+          return initial_state_of_the_system
 
-# %%
-# VQA circuit.
-from qiskit import QuantumCircuit, transpile
-
-def vqa_circuit(theta_x, theta_y, theta_z, phi):
-     vqa_circuit = QuantumCircuit(2)
-     vqa_circuit.rx(theta_x, 0)
-     vqa_circuit.ry(theta_y, 0)
-     vqa_circuit.rz(theta_z, 0)
-     vqa_circuit.cry(phi, 0, 1)
-     return vqa_circuit
-
-def anstaz_circuit(angles_lst, number_of_layers):  
-
-     number_of_angles_per_layer = 4
-
-     if len(angles_lst*number_of_angles_per_layer) % number_of_layers != 0:
-         raise ValueError("The number of angles should be divisible by the number of layers.")
-     else:
-          n_qubits = 1
-          anstaz_circuit = QuantumCircuit(n_qubits+1)
-          for i in range(number_of_layers):
-               anstaz_circuit.rx(angles_lst[i][0], 0)
-               anstaz_circuit.ry(angles_lst[i][1], 0)
-               anstaz_circuit.rz(angles_lst[i][2], 0)
-               anstaz_circuit.cry(angles_lst[i][3],0,1)  
-               anstaz_circuit.reset(0)
-     return anstaz_circuit     
-
-N = 20
-K = 20
-n_Shadows = N*K
-
-np.save("N.npy", N)
-np.save("K.npy", K)
-np.save("n_Shadows.npy", n_Shadows)
-# %%
-I = np.array([[1,0],[0,1]])
-sigma_x = np.array([[0,1],[1,0]])
-sigma_y = np.array([[0,-1j],[1j,0]])
-sigma_z = np.array([[1,0],[0,-1]])
-
-# %%
-def cost_function(b, gamma_1, gamma_2, rho_shadow_lst):
-
-     # Coefficients in the cost function.
-     f00 = b**2/2 + 5*gamma_1**2/8 + gamma_1*gamma_2 + 2*gamma_2**2
-     f02 = - b*gamma_1
-     f03 = -gamma_1**2
-     f11 = -b**2/2
-     f33 = 3*gamma_1**2/8 - gamma_1*gamma_2 - 2*gamma_2**2
-     f23 = b*gamma_1/2 - 2*gamma_2*b
-
-     return (f00*quadratic_function_prediction(N,K,I,I,rho_shadow_lst) + 
-     f02*quadratic_function_prediction(N,K,I,sigma_y,rho_shadow_lst) +  
-     f03*quadratic_function_prediction(N,K,I,sigma_z,rho_shadow_lst) + 
-     f11*quadratic_function_prediction(N,K,sigma_x,sigma_x,rho_shadow_lst) + 
-     f33*quadratic_function_prediction(N,K,sigma_z,sigma_z,rho_shadow_lst) + 
-     f23*quadratic_function_prediction(N,K,sigma_y,sigma_z,rho_shadow_lst))
-
-
-# %%
-tolerance_for_convergence = 1.e-2
-theta_x = np.random.uniform(-np.pi, np.pi)
-theta_y = np.random.uniform(-np.pi, np.pi)
-theta_z = np.random.uniform(-np.pi, np.pi)
-phi = np.random.uniform(-np.pi, np.pi)
-
-#print("Initial set of parameters =", theta_x, theta_y, theta_z, phi)
-np.save("initial_parameters.npy", [theta_x, theta_y, theta_z, phi])
-
-initial_learning_rate = 1.0
-np.save("initial_learning_rate.npy", initial_learning_rate)
-number_of_iterations = 0
-max_iterations = 100
-
-best_cost = float("inf")
-best_theta_x, best_theta_y, best_theta_z, best_phi = theta_x, theta_y, theta_z, phi
-best_iteration = 0
-
-
-b = 1
-gamma_1 = 2
-gamma_2 = 3
-
-
-while number_of_iterations < max_iterations:
-
-     num_layers = 1
-     st_instance = shadow_tomography_clifford(1,anstaz_circuit([(theta_x,theta_y,theta_z,phi)],num_layers))
-     cost_value = np.real(cost_function(b, gamma_1, gamma_2, st_instance))
-
-    # Update best parameters if a new minimum cost is found
-     if cost_value < best_cost:
-          best_cost = cost_value
-          best_theta_x, best_theta_y, best_theta_z, best_phi = theta_x, theta_y, theta_z, phi
-          best_iteration = number_of_iterations  # Update iteration number for best cost    
-
-     if cost_value <= tolerance_for_convergence:
-          #print("\n[CONVERGED] Cost function is less than the tolerance value.\n")
-          #print("Cost function =", cost_value)
-          np.save("cost_value.npy", cost_value)
-          #print("Optimized parameters =", theta_x, theta_y, theta_z, phi)
-          np.save("optimized_parameters.npy", [theta_x, theta_y, theta_z, phi])
-          break
-
-     # Decaying learning rate
-     learning_rate = initial_learning_rate / np.sqrt(number_of_iterations + 1)
-
-     # Parameter shift rule for gradient calculation
-
-     st_instance_p = shadow_tomography_clifford(1,anstaz_circuit([(theta_x + np.pi/2,theta_y,theta_z,phi)],num_layers))
-     st_instance_n = shadow_tomography_clifford(1,anstaz_circuit([(theta_x - np.pi/2,theta_y,theta_z,phi)],num_layers))
-     gradient_theta_x = 0.5 * (np.real(cost_function(b, gamma_1, gamma_2, st_instance_p)) - np.real(cost_function(b, gamma_1, gamma_2, st_instance_n)))
-
-     st_instance_p = shadow_tomography_clifford(1,anstaz_circuit([(theta_x,theta_y + np.pi/2,theta_z,phi)],num_layers))
-     st_instance_n = shadow_tomography_clifford(1,anstaz_circuit([(theta_x,theta_y - np.pi/2,theta_z,phi)],num_layers))
-     gradient_theta_y = 0.5 * (np.real(cost_function(b, gamma_1, gamma_2, st_instance_p)) - np.real(cost_function(b, gamma_1, gamma_2, st_instance_n)))
-
-     st_instance_p = shadow_tomography_clifford(1,anstaz_circuit([(theta_x,theta_y,theta_z + np.pi/2,phi)],num_layers))
-     st_instance_n = shadow_tomography_clifford(1,anstaz_circuit([(theta_x,theta_y,theta_z - np.pi/2,phi)],num_layers))
-     gradient_theta_z = 0.5 * (np.real(cost_function(b, gamma_1, gamma_2, st_instance_p)) - np.real(cost_function(b, gamma_1, gamma_2, st_instance_n)))
-
-     st_instance_p = shadow_tomography_clifford(1,anstaz_circuit([(theta_x,theta_y,theta_z,phi + np.pi/2)],num_layers))
-     st_instance_n = shadow_tomography_clifford(1,anstaz_circuit([(theta_x,theta_y,theta_z,phi - np.pi/2)],num_layers))
-     gradient_phi = 0.5 * (np.real(cost_function(b, gamma_1, gamma_2, st_instance_p)) - np.real(cost_function(b, gamma_1, gamma_2, st_instance_n)))
-
-     # Parameter update
-     theta_x -= learning_rate * gradient_theta_x
-     theta_y -= learning_rate * gradient_theta_y
-     theta_z -= learning_rate * gradient_theta_z
-     phi -= learning_rate * gradient_phi
-
-     number_of_iterations += 1
-     print("Cost function =", cost_value)
-     print("Number of iterations =", number_of_iterations)
-     print("Learning rate =", learning_rate)
-
-if number_of_iterations == max_iterations:
-     print("\n[STOPPED] Maximum number of iterations reached.\n")
-     print("Cost function =", cost_function(theta_x, theta_y, theta_z, phi))
-     print("Optimized parameters =", theta_x, theta_y, theta_z, phi)
-     print("\n[RESULT] Minimum cost encountered =", best_cost)
-     print("Parameters corresponding to minimum cost =", best_theta_x, best_theta_y, best_theta_z, best_phi)
-     print("Iteration number for minimum cost =", best_iteration)
-
-# %% [markdown]
-# ## Adam optimizer
-
-# %%
-# Initialization of tolerance, parameters, and learning rate
-tolerance_for_convergence = 1.e-2
-theta_x, theta_y, theta_z, phi = [np.random.uniform(-np.pi, np.pi) for _ in range(4)]
-print("Initial parameters =", theta_x, theta_y, theta_z, phi)
-
-initial_learning_rate = 1.0
-number_of_iterations = 0
-max_iterations = 100
-beta1, beta2, epsilon = 0.9, 0.999, 1e-8
-m, v = [0]*4, [0]*4
-max_gradient = 1.0  # Gradient clipping threshold
-
-# Track the best parameters and the corresponding iteration number
-best_cost = float("inf")
-best_theta_x, best_theta_y, best_theta_z, best_phi = theta_x, theta_y, theta_z, phi
-best_iteration = 0
-
-while number_of_iterations < max_iterations:
-     num_layers = 1
-     st_instance = shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y, theta_z, phi)], num_layers))
-     cost_value = np.real(cost_function(b, gamma_1, gamma_2, st_instance))
+     def noise_model(self, T1, T2):
      
-     # Update best parameters if a new minimum cost is found
-     if cost_value < best_cost:
-          best_cost = cost_value
-          best_theta_x, best_theta_y, best_theta_z, best_phi = theta_x, theta_y, theta_z, phi
-          best_iteration = number_of_iterations  # Update iteration number for best cost
-     
-     # Check for convergence
-     if cost_value <= tolerance_for_convergence:
-          print("\n[CONVERGED] Cost function =", cost_value)
-          print("Optimized parameters =", theta_x, theta_y, theta_z, phi)
-          print("Convergence reached at iteration =", number_of_iterations)
-          break
-     
-     # Decaying learning rate for Adam
-     learning_rate = initial_learning_rate / np.sqrt(number_of_iterations + 1)
-     
-     # Calculate gradients using parameter shift
-     gradients = [
-          0.5 * (np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x + np.pi/2, theta_y, theta_z, phi)], num_layers)))) - 
-                  np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x - np.pi/2, theta_y, theta_z, phi)], num_layers))))),
-          0.5 * (np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y + np.pi/2, theta_z, phi)], num_layers)))) - 
-                  np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y - np.pi/2, theta_z, phi)], num_layers))))),
-          0.5 * (np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y, theta_z + np.pi/2, phi)], num_layers)))) - 
-                  np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y, theta_z - np.pi/2, phi)], num_layers))))),
-          0.5 * (np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y, theta_z, phi + np.pi/2)], num_layers)))) - 
-                  np.real(cost_function(b, gamma_1, gamma_2, shadow_tomography_clifford(1, anstaz_circuit([(theta_x, theta_y, theta_z, phi - np.pi/2)], num_layers)))))
-     ]
-     
-     # Adam update with gradient clipping
-     for i, grad in enumerate(gradients):
-          grad = np.clip(grad, -max_gradient, max_gradient)  # Clipping
-          m[i] = beta1 * m[i] + (1 - beta1) * grad
-          v[i] = beta2 * v[i] + (1 - beta2) * (grad ** 2)
-          m_hat = m[i] / (1 - beta1 ** (number_of_iterations + 1))
-          v_hat = v[i] / (1 - beta2 ** (number_of_iterations + 1))
+          # Import from Qiskit Aer noise module
+          from qiskit_aer.noise import (
+          NoiseModel,
+          QuantumError,
+          ReadoutError,
+          depolarizing_error,
+          pauli_error,
+          thermal_relaxation_error,
+          )
+
+          # T1 and T2 values for qubits 0-L
+          T1s = np.random.normal(T1, 10e3, self.L + 1)
+          T2s = np.random.normal(T2, 10e3, self.L + 1)
           
-          if i == 0:
-               theta_x -= learning_rate * m_hat / (np.sqrt(v_hat) + epsilon)
-          elif i == 1:
-               theta_y -= learning_rate * m_hat / (np.sqrt(v_hat) + epsilon)
-          elif i == 2:
-               theta_z -= learning_rate * m_hat / (np.sqrt(v_hat) + epsilon)
-          elif i == 3:
-               phi -= learning_rate * m_hat / (np.sqrt(v_hat) + epsilon)
+          # Truncate random T2s <= T1s
+          T2s = np.array([min(T2s[j], 2 * T1s[j]) for j in range(self.L + 1)])
+          
+          # Instruction times (in nanoseconds)
+          time_u1 = 0  # virtual gate
+          time_u2 = 50  # (single X90 pulse)
+          time_u3 = 100  # (two X90 pulses)
+          time_cx = 300
+          time_reset = 1000  # 1 microsecond
+          time_measure = 1000  # 1 microsecond
+          
+          # QuantumError objects
+          errors_reset = [
+          thermal_relaxation_error(t1, t2, time_reset) for t1, t2 in zip(T1s, T2s)
+          ]
+          errors_measure = [
+          thermal_relaxation_error(t1, t2, time_measure) for t1, t2 in zip(T1s, T2s)
+          ]
+          errors_u1 = [
+          thermal_relaxation_error(t1, t2, time_u1) for t1, t2 in zip(T1s, T2s)
+          ]
+          errors_u2 = [
+          thermal_relaxation_error(t1, t2, time_u2) for t1, t2 in zip(T1s, T2s)
+          ]
+          errors_u3 = [
+          thermal_relaxation_error(t1, t2, time_u3) for t1, t2 in zip(T1s, T2s)
+          ]
+          errors_cx = [
+          [
+               thermal_relaxation_error(t1a, t2a, time_cx).expand(
+                    thermal_relaxation_error(t1b, t2b, time_cx)
+               )
+               for t1a, t2a in zip(T1s, T2s)
+          ]
+          for t1b, t2b in zip(T1s, T2s)
+          ]
+          
+          # Add errors to noise model
+          noise_thermal = NoiseModel()
+          for j in range(self.L + 1):
+               noise_thermal.add_quantum_error(errors_reset[j], "reset", [j])
+               noise_thermal.add_quantum_error(errors_measure[j], "measure", [j])
+               noise_thermal.add_quantum_error(errors_u1[j], "u1", [j])
+               noise_thermal.add_quantum_error(errors_u2[j], "u2", [j])
+               noise_thermal.add_quantum_error(errors_u3[j], "u3", [j])
+               for k in range(self.L + 1):
+                    noise_thermal.add_quantum_error(errors_cx[j][k], "cx", [j, k])
      
-     number_of_iterations += 1
-     print(f"Iteration {number_of_iterations}: Cost =", cost_value)
+          return noise_thermal
+     
+     def number_operator(self):
+          n = self.L  # total qubits
+          # Qiskit: rightmost char is qubit 0
+          z_terms = ["I"*(n-1-j) + "Z" + "I"*j for j in range(n)]
+          op = SparsePauliOp(z_terms, -0.5*np.ones(n))
+          op += SparsePauliOp(["I"*n], [0.5*n])  # (n/2) * I
 
-# After the loop, print the best found values and corresponding iteration number
-print("\n[RESULT] Minimum cost encountered =", best_cost)
-print("Parameters corresponding to minimum cost =", best_theta_x, best_theta_y, best_theta_z, best_phi)
-print("Iteration number for minimum cost =", best_iteration)
+          # Add one "I" at the end of each pauli string for the ancilla qubit.
+          new_pauli_labels = [pauli + "I" for pauli in op.paulis.to_labels()]
+          op = SparsePauliOp(new_pauli_labels, op.coeffs)
+
+          return op.simplify()
+
+     def energy_expectation_value_estimator(self,
+                                   gamma_in,
+                                   gamma_out,
+                                   dt,
+                                   number_of_data_points,
+                                   simulation_type):
+
+          initial_state = Statevector.from_label(self.initial_state())
+          LUMO_qubit_index = self.LUMO_index()              
+
+          new_pauli_labels = [pauli + "I" for pauli in self.qubit_hamiltonian_truncated.paulis.to_labels()]
+
+          # Energy current.
+          qubit_hamiltonian_truncated_obs = SparsePauliOp(new_pauli_labels, self.qubit_hamiltonian_truncated.coeffs)          
+
+          expectation_values_mean_lst = []
+          expectation_values_std_lst = []
+
+          statevector_lst = []
+          circuit_lst = []
+
+          if simulation_type["Noisy"] == True:
+               from qiskit_aer import AerSimulator
+               from qiskit_aer.primitives import EstimatorV2 as Estimator
+               noise_thermal = self.noise_model(T1 = simulation_type["T_1"], T2 = simulation_type["T_2"])
+               sim_thermal = AerSimulator(noise_model = noise_thermal)
+               noisy_estimator = Estimator(options=dict(backend_options=dict(noise_model=noise_thermal)))
+
+          elif simulation_type["Noisy"] == False:
+               from qiskit_aer import AerSimulator
+               from qiskit_aer.primitives import EstimatorV2 as Estimator    
+               noiseless_estimator = Estimator()                       
 
 
+          for ii in range(1, number_of_data_points):
+               
+               if gamma_in * dt >= 1.0 or gamma_out * dt >= 1.0:
+                    print("Either gamma_in, gamma_out or dt is too large. Make gamma_in * dt and gamma_out * dt < 1.")
+                    print("This is necessary for the Trotter approximation to be valid.")
+                    break
+
+               t_final = np.around(ii*dt,2)
+               print("Time = ", t_final)
+          
+               # This section sets up the time evolution problem and the trotter circuit using the custom trotter class.
+               problem = TimeEvolutionProblem(self.qubit_hamiltonian_truncated, initial_state = initial_state, time = t_final)
+
+               if simulation_type["Noisy"] == True:
+                    trotterop = trotter.TrotterQRTE(num_timesteps = ii, LUMO_qubit_index = LUMO_qubit_index, gamma_out = gamma_out, gamma_in = gamma_in, estimator = noisy_estimator)
+                    passmanager = generate_preset_pass_manager(3, AerSimulator()) # Noisy simulator.                    
+               elif simulation_type["Noisy"] == False:              
+                    trotterop = trotter.TrotterQRTE(num_timesteps = ii, LUMO_qubit_index = LUMO_qubit_index, gamma_out = gamma_out, gamma_in = gamma_in, estimator = noiseless_estimator)
+                    passmanager = generate_preset_pass_manager(3, AerSimulator())
+
+               result = trotterop.evolve(problem)
+               circuit_lst.append(result)
+               trotter_circuit = result.evolved_state.decompose()
+               statevector_lst.append(Statevector(result.evolved_state))
+
+               isa_psi = passmanager.run(trotter_circuit)
+               
+               print("Final depth = ", isa_psi.depth())  
+               isa_observables = qubit_hamiltonian_truncated_obs.apply_layout(isa_psi.layout)
+
+               if simulation_type["Noisy"] == True:
+                    job = noisy_estimator.run([(isa_psi, isa_observables)])
+               elif simulation_type["Noisy"] == False:
+                    job = noiseless_estimator.run([(isa_psi, isa_observables)])
+
+               pub_result = job.result()[0]
+               expectation_values_mean_lst.append(pub_result.data.evs)
+               expectation_values_std_lst.append(pub_result.data.stds)               
+               
+          return expectation_values_mean_lst, expectation_values_std_lst, circuit_lst, statevector_lst
+     
+     def variational_circuit(self, angles_lst):
+                 
+          initial_state = Statevector.from_label(self.initial_state())
+          LUMO_qubit_index = self.LUMO_index()
+
+     
+          new_pauli_labels = [pauli + "I" for pauli in self.qubit_hamiltonian_truncated.paulis.to_labels()]
+
+          # Energy current.
+          qubit_hamiltonian_truncated_obs = SparsePauliOp(new_pauli_labels, self.qubit_hamiltonian_truncated.coeffs)          
+
+          # Always use noiseless estimator for VQA.
+          from qiskit_aer import AerSimulator
+          from qiskit_aer.primitives import EstimatorV2 as Estimator    
+          noiseless_estimator = Estimator()     
+
+          trotter_circuit_total = QuantumCircuit(self.L + 1) # +1 for the ancilla qubit.
+
+          for layer in range(len(angles_lst)):
+               # Unpacking the angles for unitary and the ancilla rotations.
+               theta_unitary, theta_gamma_in, theta_gamma_out = angles_lst[layer]
+
+               problem = TimeEvolutionProblem(self.qubit_hamiltonian_truncated, initial_state = initial_state, time = theta_unitary)
+               trotterop = trotter.TrotterQRTE(num_timesteps = 1, LUMO_qubit_index = LUMO_qubit_index, gamma_out = theta_gamma_out, gamma_in = theta_gamma_in, estimator = noiseless_estimator)
+               passmanager = generate_preset_pass_manager(3, AerSimulator())
+               result = trotterop.evolve(problem)
+               trotter_circuit = result.evolved_state.decompose()
+               trotter_circuit_total = trotter_circuit_total.compose(trotter_circuit)
+
+          isa_psi = passmanager.run(trotter_circuit_total)           
+          isa_observables = qubit_hamiltonian_truncated_obs.apply_layout(isa_psi.layout)        
+
+          job = noiseless_estimator.run([(isa_psi, isa_observables)])   
+          pub_result = job.result()[0]
+
+          energy_expectation_val = pub_result.data.evs          
+          return energy_expectation_val
+     
+     def parameter_shift_gradient(self, angles_lst, shift = np.pi/2):
+          """
+          This function calculates the gradient of the energy expectation value with respect to the parameters using the parameter-shift rule.
+          """
+          gradients = []
+
+          for layer_idx, (theta_unitary, theta_gamma_in, theta_gamma_out) in enumerate(angles_lst):
+               # Gradient for theta_unitary
+               angles_plus = angles_lst.copy()
+               angles_minus = angles_lst.copy()
+               
+               angles_plus[layer_idx] = (theta_unitary + shift, theta_gamma_in, theta_gamma_out)
+               angles_minus[layer_idx] = (theta_unitary - shift, theta_gamma_in, theta_gamma_out)
+               
+               energy_plus = self.variational_circuit(angles_plus)
+               energy_minus = self.variational_circuit( angles_minus)
+               
+               grad_theta_unitary = (energy_plus - energy_minus) / (2 * np.sin(shift))
+               
+               # Gradient for theta_gamma_in
+               angles_plus = angles_lst.copy()
+               angles_minus = angles_lst.copy()
+               
+               angles_plus[layer_idx] = (theta_unitary, theta_gamma_in + shift, theta_gamma_out)
+               angles_minus[layer_idx] = (theta_unitary, theta_gamma_in - shift, theta_gamma_out)
+               
+               energy_plus = self.variational_circuit(angles_plus)
+               energy_minus = self.variational_circuit(angles_minus)
+               
+               grad_theta_gamma_in = (energy_plus - energy_minus) / (2 * np.sin(shift))
+
+               # Gradient for theta_gamma_out
+               angles_plus = angles_lst.copy()
+               angles_minus = angles_lst.copy()
+
+               angles_plus[layer_idx] = (theta_unitary, theta_gamma_in, theta_gamma_out + shift)
+               angles_minus[layer_idx] = (theta_unitary, theta_gamma_in, theta_gamma_out - shift)
+
+               energy_plus = self.variational_circuit(angles_plus)
+               energy_minus = self.variational_circuit(angles_minus)
+               grad_theta_gamma_out = (energy_plus - energy_minus) / (2 * np.sin(shift))
+
+               gradients.append((grad_theta_unitary, grad_theta_gamma_in, grad_theta_gamma_out))
+
+          return gradients
+     
+     def optimize(self, initial_angles, learning_rate, num_iterations):
+          # Print a statement about the depth of the ansatz circuit.
+          print(f"Running a depth {len(initial_angles)} ansatz circuit.")
+          if len(initial_angles) > 10:
+               print(f"Depth is quite large. This may take a long time to run.")
+
+          # Ensure angles is a mutable list of tuples of floats
+          angles = [(float(a[0]), float(a[1]), float(a[2])) for a in initial_angles]
+          angles_history = [angles.copy()]
+          energy_history = [np.array(self.variational_circuit(angles)).item()]
+
+          for iteration in range(num_iterations):
+               print(f"Iteration {iteration + 1}/{num_iterations}")
+               print(f"Calculating gradients.")
+               gradients = self.parameter_shift_gradient(angles)
+               # Update angles using gradient descent (cast grads to float)
+               angles = [
+                    (float(theta_unitary) - learning_rate * float(grad_unitary),
+                     float(theta_gamma_in) - learning_rate * float(grad_theta_gamma_in),
+                     float(theta_gamma_out) - learning_rate * float(grad_theta_gamma_out))
+                    for (theta_unitary, theta_gamma_in, theta_gamma_out), (grad_unitary, grad_theta_gamma_in, grad_theta_gamma_out)
+                    in zip(angles, gradients)
+               ]
+               angles_history.append(angles.copy())
+               energy = np.array(self.variational_circuit(angles)).item()
+               energy_history.append(energy)
+               print(f"Energy: {energy}")
+
+          return angles, angles_history, energy_history
