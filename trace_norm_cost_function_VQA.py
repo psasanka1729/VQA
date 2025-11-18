@@ -23,10 +23,10 @@ class VQA:
      sigma_z = csc_matrix(np.array([[1, 0], [0, -1]], dtype=complex))     
 
      # Single qubit jump operators.
-     L_in_op = csc_matrix((sigma_x - 1j * sigma_y) / 2)
-     L_out_op = csc_matrix((sigma_x + 1j * sigma_y) / 2)   
+     L_in_op = csc_matrix((sigma_x + 1j * sigma_y) / 2)
+     L_out_op = csc_matrix((sigma_x - 1j * sigma_y) / 2)   
 
-     def __init__(self, hamiltonian_of_molecule, cutoff, remove_identity):
+     def __init__(self, hamiltonian_of_molecule, cutoff):
 
           # Hamiltonian_of_molecule is a FermionicOp object
           self.hamiltonian_of_molecule = hamiltonian_of_molecule
@@ -54,11 +54,11 @@ class VQA:
           self.sigma_y = VQA.sigma_y
           self.sigma_z = VQA.sigma_z
 
-          # Option to remove the identity term from the qubit Hamiltonian.
-          self.remove_identity = remove_identity
-          if self.remove_identity == True:
-               self.qubit_hamiltonian_truncated = self.qubit_hamiltonian_truncated - SparsePauliOp(["I"* (self.L)], [self.qubit_hamiltonian_truncated.coeffs[0]])
-               print("The identity term has been removed from the qubit Hamiltonian.")  
+          # # Option to remove the identity term from the qubit Hamiltonian.
+          # self.remove_identity = remove_identity
+          # if self.remove_identity == True:
+          #      self.qubit_hamiltonian_truncated = self.qubit_hamiltonian_truncated - SparsePauliOp(["I"* (self.L)], [self.qubit_hamiltonian_truncated.coeffs[0]])
+          #      print("The identity term has been removed from the qubit Hamiltonian.")  
 
      """ 
      We now determine the index of the qubit that corresponds to the LUMO orbital.
@@ -110,7 +110,8 @@ class VQA:
                     LUMO_idx =  idx
                     # print(f"The LUMO is at qubit index {LUMO_idx}")                    
                     return LUMO_idx                                    
-                    
+
+
      # Initial state is the lowest energy half-filled state.
      def initial_state(self):
           initial_state_of_the_system = self.lowest_half_filled_states()[0][0]          
@@ -203,40 +204,34 @@ class VQA:
 
      # This function constructs the multi-qubit jump operators acting on the LUMO orbital.
      def jump_operators(self):
-
-          # Multi-qubit jump operators acting on LUMO.
-          LUMO_idx = self.LUMO_index()
-          # Qiskit counts from right to left. So say for LUMO_idx = 3 in a 8 qubit system then the index is actually 8 - 3 - 1.
-          LUMO_idx_from_left = self.L - LUMO_idx - 1       
-
-          # This loop constructs the multi-qubit jump operators.
-          if LUMO_idx_from_left == 0:
-               L_in_op_full_system = self.L_in_op
-               L_out_op_full_system = self.L_out_op
-               for qubit in range(1, self.L):
-                    if qubit == LUMO_idx_from_left:
-                         L_in_op_full_system = kron(L_in_op_full_system, self.L_in_op, format='csc')
-                         L_out_op_full_system = kron(L_out_op_full_system, self.L_out_op, format='csc')
-                    else:
-                         L_in_op_full_system = kron(L_in_op_full_system, self.I2, format='csc')
-                         L_out_op_full_system = kron(L_out_op_full_system, self.I2, format='csc')     
-          else:
-               L_in_op_full_system = self.I2
-               L_out_op_full_system = self.I2
-               for qubit in range(1, self.L):
-                    if qubit == LUMO_idx_from_left:
-                         L_in_op_full_system = kron(L_in_op_full_system, self.L_in_op, format='csc')
-                         L_out_op_full_system = kron(L_out_op_full_system, self.L_out_op, format='csc')
-                    else:
-                         L_in_op_full_system = kron(L_in_op_full_system, self.I2, format='csc')
-                         L_out_op_full_system = kron(L_out_op_full_system, self.I2, format='csc')
-          return L_in_op_full_system, L_out_op_full_system       
+          """Build jump operators on LUMO qubit"""
+          LUMO_idx = self.LUMO_index()  # From right: 0 is rightmost
+          LUMO_idx_from_left = self.L - LUMO_idx - 1  # Convert to left indexing
+          
+          # Build from left to right
+          L_in_full = None
+          L_out_full = None
+          
+          for qubit in range(self.L):  # 0, 1, 2, ..., L-1 (left to right)
+               if qubit == LUMO_idx_from_left:
+                    factor_in = self.L_in_op
+                    factor_out = self.L_out_op
+               else:
+                    factor_in = self.I2
+                    factor_out = self.I2
+               
+               if L_in_full is None:
+                    L_in_full = factor_in
+                    L_out_full = factor_out
+               else:
+                    L_in_full = kron(L_in_full, factor_in, format='csc')
+                    L_out_full = kron(L_out_full, factor_out, format='csc')
+          
+          return L_in_full, L_out_full
 
 
      """
-
           Cost function C[\rho] = Tr[L(rho)^\dagger L(rho)].
-
      """
      def cost_function(self, rho, gamma_in, gamma_out):
           # Hamiltonian part.
@@ -325,10 +320,10 @@ class VQA:
 
                if simulation_type["Noisy"] == True:
                     trotterop = trotter.TrotterQRTE(num_timesteps = ii, LUMO_qubit_index = LUMO_qubit_index, gamma_out = gamma_out, gamma_in = gamma_in, estimator = noisy_estimator)
-                    passmanager = generate_preset_pass_manager(3, AerSimulator()) # Noisy simulator.                    
+                    passmanager = generate_preset_pass_manager(2, AerSimulator()) # Noisy simulator.                    
                elif simulation_type["Noisy"] == False:              
                     trotterop = trotter.TrotterQRTE(num_timesteps = ii, LUMO_qubit_index = LUMO_qubit_index, gamma_out = gamma_out, gamma_in = gamma_in, estimator = noiseless_estimator)
-                    passmanager = generate_preset_pass_manager(3, AerSimulator())
+                    passmanager = generate_preset_pass_manager(2, AerSimulator())
 
                # These are standard ways to calculate the time evolution using Qiskit.
                result = trotterop.evolve(problem)
@@ -392,6 +387,7 @@ class VQA:
           initial_state = Statevector.from_label(self.initial_state())
           LUMO_qubit_index = self.LUMO_index()              
 
+          rho_lst = []
 
           if simulation_type["Noisy"] == True:
                from qiskit_aer import AerSimulator
@@ -443,10 +439,11 @@ class VQA:
                     result = job.result().data()
                     rho = result.get('density_matrix')
 
-          # Trace over the ancilla qubit.
-          rho_system = partial_trace(rho.data, [0])
+               # Trace over the ancilla qubit.
+               rho_system = partial_trace(rho.data, [0])
+               rho_lst.append(rho_system.data)
 
-          return rho_system.data
+          return rho_lst
    
      
      def variational_circuit(self, gamma_in, gamma_out, angles_lst, simulation_type):
@@ -469,6 +466,8 @@ class VQA:
           -------
           cost : float
                The value of the cost function C[\rho] = Tr[L(rho)^\dagger L(rho)] for the final density matrix rho.
+          rho_system : ndarray
+               The reduced density matrix of the system (tracing out the ancilla qubit) after applying the variational circuit.
           """
 
           initial_state = Statevector.from_label(self.initial_state())
@@ -495,7 +494,7 @@ class VQA:
                theta_unitary, theta_gamma_in, theta_gamma_out = angles_lst[layer]
 
                problem = TimeEvolutionProblem(self.qubit_hamiltonian_truncated, initial_state = initial_state, time = theta_unitary)
-               
+
                if simulation_type["Noisy"] == True:
                     trotterop = trotter.TrotterQRTE(num_timesteps = 1, LUMO_qubit_index = LUMO_qubit_index, gamma_out = theta_gamma_out, gamma_in = theta_gamma_in, estimator = noisy_estimator)
                     # passmanager = generate_preset_pass_manager(3, AerSimulator()) # Noisy simulator.                    
@@ -525,7 +524,7 @@ class VQA:
 
           cost = self.cost_function(rho_system.data, gamma_in, gamma_out)
 
-          return cost       
+          return rho_system, cost       
      
      def parameter_shift_gradient(self, gamma_in, gamma_out, angles_lst, simulation_type, shift = np.pi/2):
           """
@@ -541,8 +540,8 @@ class VQA:
                angles_plus[layer_idx] = (theta_unitary + shift, theta_gamma_in, theta_gamma_out)
                angles_minus[layer_idx] = (theta_unitary - shift, theta_gamma_in, theta_gamma_out)
                
-               cost_plus = self.variational_circuit(gamma_in, gamma_out, angles_plus, simulation_type)
-               cost_minus = self.variational_circuit(gamma_in, gamma_out, angles_minus, simulation_type)
+               _, cost_plus = self.variational_circuit(gamma_in, gamma_out, angles_plus, simulation_type)
+               _, cost_minus = self.variational_circuit(gamma_in, gamma_out, angles_minus, simulation_type)
                
                grad_theta_unitary = (cost_plus - cost_minus) / (2 * np.sin(shift))
                
@@ -553,8 +552,8 @@ class VQA:
                angles_plus[layer_idx] = (theta_unitary, theta_gamma_in + shift, theta_gamma_out)
                angles_minus[layer_idx] = (theta_unitary, theta_gamma_in - shift, theta_gamma_out)
                
-               cost_plus = self.variational_circuit(gamma_in, gamma_out, angles_plus, simulation_type)
-               cost_minus = self.variational_circuit(gamma_in, gamma_out, angles_minus, simulation_type)
+               _, cost_plus = self.variational_circuit(gamma_in, gamma_out, angles_plus, simulation_type)
+               _, cost_minus = self.variational_circuit(gamma_in, gamma_out, angles_minus, simulation_type)
                
                grad_theta_gamma_in = (cost_plus - cost_minus) / (2 * np.sin(shift))
 
@@ -565,8 +564,8 @@ class VQA:
                angles_plus[layer_idx] = (theta_unitary, theta_gamma_in, theta_gamma_out + shift)
                angles_minus[layer_idx] = (theta_unitary, theta_gamma_in, theta_gamma_out - shift)
 
-               cost_plus = self.variational_circuit(gamma_in, gamma_out, angles_plus, simulation_type)
-               cost_minus = self.variational_circuit(gamma_in, gamma_out, angles_minus, simulation_type)
+               _, cost_plus = self.variational_circuit(gamma_in, gamma_out, angles_plus, simulation_type)
+               _, cost_minus = self.variational_circuit(gamma_in, gamma_out, angles_minus, simulation_type)
                grad_theta_gamma_out = (cost_plus - cost_minus) / (2 * np.sin(shift))
 
                gradients.append((grad_theta_unitary, grad_theta_gamma_in, grad_theta_gamma_out))
@@ -583,7 +582,12 @@ class VQA:
           # Ensure angles is a mutable list of tuples of floats
           angles = [(float(a[0]), float(a[1]), float(a[2])) for a in initial_angles]
           angles_history = [angles.copy()]
-          cost_history = [np.array(self.variational_circuit(gamma_in, gamma_out, initial_angles, simulation_type)).item()]
+          rho_history = []
+          cost_history = []
+          # Calculate initial cost and density matrix
+          initial_rho, initial_cost = self.variational_circuit(gamma_in, gamma_out, initial_angles, simulation_type)
+          cost_history = [initial_cost]
+          rho_history = [initial_rho]
 
           for iteration in range(num_iterations):
                print(f"Iteration {iteration + 1}/{num_iterations}")
@@ -598,17 +602,23 @@ class VQA:
                     in zip(angles, gradients)
                ]
                angles_history.append(angles.copy())
-               cost = np.array(self.variational_circuit(gamma_in, gamma_out, angles, simulation_type)).item()
+               rho, cost = self.variational_circuit(gamma_in, gamma_out, angles, simulation_type)
+               rho_history.append(rho)
                cost_history.append(cost)
                print(f"Cost : {cost}")
 
-          return angles, angles_history, cost_history
+          return angles, angles_history, rho_history, cost_history
 
      def optimize_last_layer(self, gamma_in, gamma_out, angles, learning_rate, num_iterations, simulation_type):
           # Ensure angles is a mutable list of tuples of floats
           angles = [(float(a[0]), float(a[1]), float(a[2])) for a in angles]
           angles_history = [angles.copy()]
-          cost_history = [np.array(self.variational_circuit(gamma_in, gamma_out, angles, simulation_type)).item()]
+          rho_history = []
+          cost_history = []
+          # Calculate initial cost and density matrix
+          initial_rho, initial_cost = self.variational_circuit(gamma_in, gamma_out, angles, simulation_type)
+          cost_history = [initial_cost]
+          rho_history = [initial_rho]
 
           for iteration in range(num_iterations):
                print(f"Iteration {iteration + 1}/{num_iterations}")
@@ -629,8 +639,9 @@ class VQA:
                )
                
                angles_history.append(angles.copy())
-               cost = np.array(self.variational_circuit(gamma_in, gamma_out, angles, simulation_type)).item()
+               rho, cost = self.variational_circuit(gamma_in, gamma_out, angles, simulation_type)
+               rho_history.append(rho)
                cost_history.append(cost)
                print(f"Cost : {cost}")
 
-          return angles, angles_history, cost_history
+          return angles, angles_history, rho_history, cost_history
